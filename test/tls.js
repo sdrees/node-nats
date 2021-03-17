@@ -1,146 +1,215 @@
-/* jslint node: true */
-/* global describe: false, before: false, after: false, it: false */
-'use strict';
+/*
+ * Copyright 2020-2021 The NATS Authors
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+const test = require("ava");
+const {
+  connect,
+  ErrorCode,
+} = require(
+  "../",
+);
+const { resolve, join } = require("path");
+const { readFileSync } = require("fs");
+const { Lock } = require("./helpers/lock");
+const { NatsServer } = require("./helpers/launcher");
+const { buildAuthenticator } = require("../lib/nats-base-client/authenticator");
+const { extend } = require("../lib/nats-base-client/util");
+const { Connect } = require("../lib/nats-base-client/protocol");
 
-var NATS = require('../'),
-    nsc = require('./support/nats_server_control'),
-    should = require('should'),
-    fs = require('fs');
+const dir = process.cwd();
+const tlsConfig = {
+  host: "0.0.0.0",
+  tls: {
+    cert_file: resolve(join(dir, "./test/certs/localhost.crt")),
+    key_file: resolve(join(dir, "./test/certs/localhost.key")),
+    ca_file: resolve(join(dir, "./test/certs/ca.crt")),
+  },
+};
 
-describe('TLS', function() {
-
-    var PORT = 1442;
-    var TLSPORT = 1443;
-    var TLSVERIFYPORT = 1444;
-    var flags = [];
-
-    var server;
-    var tlsServer;
-    var tlsVerifyServer;
-
-    // Start up our own nats-server for each test
-    // We will start a plain, a no client cert, and a client cert required.
-    before(function(done) {
-        server = nsc.start_server(PORT, function() {
-            var flags = ['--tls', '--tlscert', './test/certs/server-cert.pem',
-                '--tlskey', './test/certs/server-key.pem'
-            ];
-            tlsServer = nsc.start_server(TLSPORT, flags, function() {
-                var flags = ['--tlsverify', '--tlscert', './test/certs/server-cert.pem',
-                    '--tlskey', './test/certs/server-key.pem',
-                    '--tlscacert', './test/certs/ca.pem'
-                ];
-                tlsVerifyServer = nsc.start_server(TLSVERIFYPORT, flags, done);
-            });
-        });
+test("tls - fail if server doesn't support TLS", async (t) => {
+  t.plan(1);
+  const lock = Lock();
+  await connect({ servers: "demo.nats.io:4222", tls: {} })
+    .then(() => {
+      t.fail("shouldn't have connected");
+    })
+    .catch((err) => {
+      t.is(err.code, ErrorCode.ServerOptionNotAvailable);
+      lock.unlock();
     });
-
-
-    // Shutdown our server after each test.
-    after(function(done) {
-        nsc.stop_cluster([server, tlsServer, tlsVerifyServer], done);
-    });
-
-    it('should error if server does not support TLS', function(done) {
-        var nc = NATS.connect({
-            port: PORT,
-            tls: true
-        });
-        nc.on('error', function(err) {
-            should.exist(err);
-            should.exist(/Server does not support a secure/.exec(err));
-            nc.close();
-            done();
-        });
-    });
-
-    it('should error if server requires TLS', function(done) {
-        var nc = NATS.connect(TLSPORT);
-        nc.on('error', function(err) {
-            should.exist(err);
-            should.exist(/Server requires a secure/.exec(err));
-            nc.close();
-            done();
-        });
-    });
-
-    it('should reject without proper CA', function(done) {
-        var nc = NATS.connect({
-            port: TLSPORT,
-            tls: true
-        });
-        nc.on('error', function(err) {
-            should.exist(err);
-            should.exist(/unable to verify the first certificate/.exec(err));
-            nc.close();
-            done();
-        });
-    });
-
-    it('should connect if authorized is overridden', function(done) {
-        var tlsOptions = {
-            rejectUnauthorized: false,
-        };
-        var nc = NATS.connect({
-            port: TLSPORT,
-            tls: tlsOptions
-        });
-        should.exist(nc);
-        nc.on('connect', function(client) {
-            client.should.equal(nc);
-            nc.stream.authorized.should.equal(false);
-            nc.close();
-            done();
-        });
-    });
-
-    it('should connect with proper ca and be authorized', function(done) {
-        var tlsOptions = {
-            ca: [fs.readFileSync('./test/certs/ca.pem')]
-        };
-        var nc = NATS.connect({
-            port: TLSPORT,
-            tls: tlsOptions
-        });
-        should.exist(nc);
-        nc.on('connect', function(client) {
-            client.should.equal(nc);
-            nc.stream.authorized.should.equal(true);
-            nc.close();
-            done();
-        });
-    });
-
-    it('should reject without proper cert if required by server', function(done) {
-        var nc = NATS.connect({
-            port: TLSVERIFYPORT,
-            tls: true
-        });
-        nc.on('error', function(err) {
-            should.exist(err);
-            should.exist(/Server requires a client certificate/.exec(err));
-            nc.close();
-            done();
-        });
-    });
-
-
-    it('should be authrorized with proper cert', function(done) {
-        var tlsOptions = {
-            key: fs.readFileSync('./test/certs/client-key.pem'),
-            cert: fs.readFileSync('./test/certs/client-cert.pem'),
-            ca: [fs.readFileSync('./test/certs/ca.pem')]
-        };
-        var nc = NATS.connect({
-            port: TLSPORT,
-            tls: tlsOptions
-        });
-        nc.on('connect', function(client) {
-            client.should.equal(nc);
-            nc.stream.authorized.should.equal(true);
-            nc.close();
-            done();
-        });
-    });
-
+  await lock;
 });
+
+test("tls - connects to tls without option", async (t) => {
+  const nc = await connect({ servers: "demo.nats.io:4443" });
+  await nc.flush();
+  await nc.close();
+  t.pass();
+});
+
+test("tls - custom ca fails without proper ca", async (t) => {
+  t.plan(1);
+  const ns = await NatsServer.start(tlsConfig);
+  const lock = Lock();
+  await connect({ servers: `localhost:${ns.port}`, maxReconnectAttempts: 4 })
+    .then(() => {
+      t.fail("shouldn't have connected without client ca");
+    })
+    .catch(() => {
+      // this throws a totally un-useful connection reset.
+      t.pass();
+      lock.unlock();
+    });
+
+  await lock;
+  await ns.stop();
+});
+
+test("tls - connects with proper ca", async (t) => {
+  const ns = await NatsServer.start(tlsConfig);
+  const nc = await connect({
+    servers: `localhost:${ns.port}`,
+    tls: {
+      caFile: tlsConfig.tls.ca_file,
+    },
+  });
+  await nc.flush();
+  t.true(nc.protocol.transport.socket.authorized);
+  await nc.close();
+  await ns.stop();
+  t.pass();
+});
+
+test("tls - client auth", async (t) => {
+  const ns = await NatsServer.start(tlsConfig);
+
+  const certs = {
+    keyFile: resolve(join(dir, "./test/certs/client.key")),
+    certFile: resolve(join(dir, "./test/certs/client.crt")),
+    caFile: resolve(join(dir, "./test/certs/ca.crt")),
+  };
+  const nc = await connect({
+    port: ns.port,
+    tls: certs,
+  });
+
+  await nc.flush();
+  await nc.close();
+  await ns.stop();
+  t.pass();
+});
+
+test("tls - client auth direct", async (t) => {
+  const ns = await NatsServer.start(tlsConfig);
+
+  const certs = {
+    key: readFileSync(resolve(join(dir, "./test/certs/client.key"))),
+    cert: readFileSync(resolve(join(dir, "./test/certs/client.crt"))),
+    ca: readFileSync(resolve(join(dir, "./test/certs/ca.crt"))),
+  };
+  const nc = await connect({
+    port: ns.port,
+    tls: certs,
+  });
+
+  await nc.flush();
+  await nc.close();
+  await ns.stop();
+  t.pass();
+});
+
+test("tls - shouldn't leak tls config", (t) => {
+  const tlsOptions = {
+    keyFile: resolve(join(dir, "./test/certs/client.key")),
+    certFile: resolve(join(dir, "./test/certs/client.crt")),
+    caFile: resolve(join(dir, "./test/certs/ca.crt")),
+  };
+
+  let opts = { tls: tlsOptions, cert: "another" };
+  const auth = buildAuthenticator(opts);
+  opts = extend(opts, auth);
+
+  const c = new Connect({ version: "1.2.3", lang: "test" }, opts);
+  const cc = JSON.parse(JSON.stringify(c));
+  t.is(cc.tls_required, true);
+  t.is(cc.cert, undefined);
+  t.is(cc.keyFile, undefined);
+  t.is(cc.certFile, undefined);
+  t.is(cc.caFile, undefined);
+  t.is(cc.tls, undefined);
+});
+
+async function tlsInvalidCertMacro(t, conf, tlsCode, re) {
+  t.plan(3);
+  const ns = await NatsServer.start(tlsConfig);
+  try {
+    await connect({ servers: `localhost:${ns.port}`, tls: conf });
+    t.fail("shouldn't have connected");
+  } catch (err) {
+    t.is(err.code, ErrorCode.Tls);
+    t.truthy(err.chainedError);
+    t.truthy(re.exec(err.chainedError.message));
+  }
+  await ns.stop();
+}
+
+test(
+  "tls - invalid cert",
+  tlsInvalidCertMacro,
+  {
+    keyFile: resolve(join(dir, "./test/certs/client.key")),
+    certFile: resolve(join(dir, "./test/certs/ca.crt")),
+    caFile: resolve(join(dir, "./test/certs/localhost.crt")),
+  },
+  "ERR_OSSL_X509_KEY_VALUES_MISMATCH",
+  /key values mismatch/i,
+);
+
+test(
+  "tls - invalid pem no start",
+  tlsInvalidCertMacro,
+  {
+    keyFile: resolve(join(dir, "./test/certs/client.crt")),
+    certFile: resolve(join(dir, "./test/certs/client.key")),
+    caFile: resolve(join(dir, "./test/certs/ca.crt")),
+  },
+  "ERR_OSSL_PEM_NO_START_LINE",
+  /no start line/i,
+);
+
+async function tlsInvalidArgPathMacro(t, conf, arg) {
+  t.plan(2);
+  const ns = await NatsServer.start(tlsConfig);
+  try {
+    await connect({ servers: `localhost:${ns.port}`, tls: conf });
+    t.fail("shouldn't have connected");
+  } catch (err) {
+    t.is(err.code, ErrorCode.Tls);
+    const v = conf[arg];
+    t.is(err.message, `${v} doesn't exist`);
+  }
+  await ns.stop();
+}
+
+test("tls - invalid key file", tlsInvalidArgPathMacro, {
+  keyFile: resolve(join(dir, "./test/certs/client.ky")),
+}, "keyFile");
+
+test("tls - invalid cert file", tlsInvalidArgPathMacro, {
+  certFile: resolve(join(dir, "./test/certs/client.cert")),
+}, "certFile");
+
+test("tls - invalid ca file", tlsInvalidArgPathMacro, {
+  caFile: resolve(join(dir, "./test/certs/ca.cert")),
+}, "caFile");
